@@ -1,0 +1,862 @@
+name: ⚔️ Shadow Village 3D – Original 3D Model & Real Third-Person Camera
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Export IPA
+    runs-on: macos-14
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Latest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install Build Tools
+        run: |
+          brew install xcodegen
+          gem install xcpretty --no-document 2>/dev/null || true
+
+      - name: Create Project Directories
+        run: |
+          mkdir -p GameHub/Sources
+          mkdir -p GameHub/Sources/Input
+
+      # ── AppDelegate ──────────────────────────────────────────────────────────
+      - name: Create AppDelegate.swift
+        run: |
+          cat << 'EOF' > GameHub/Sources/AppDelegate.swift
+          import UIKit
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              func application(
+                  _ application: UIApplication,
+                  didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+              ) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = GameViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+          EOF
+
+      # ── Smooth Touch Joystick System ─────────────────────────────────────────
+      - name: Write Touch Input System
+        run: |
+          cat << 'EOF' > GameHub/Sources/Input/TouchJoystick.swift
+          import UIKit
+
+          class TouchJoystick: UIView {
+              var onChange: (CGPoint) -> Void = { _ in }
+              
+              private let baseView = UIView()
+              private let stickView = UIView()
+              private var baseRadius: CGFloat = 55
+              private var stickRadius: CGFloat = 25
+              
+              override init(frame: CGRect) {
+                  super.init(frame: frame)
+                  setupUI()
+              }
+              
+              required init?(coder: NSCoder) { fatalError() }
+              
+              private func setupUI() {
+                  backgroundColor = .clear
+                  
+                  baseView.frame = CGRect(x: 0, y: 0, width: baseRadius * 2, height: baseRadius * 2)
+                  baseView.backgroundColor = UIColor(white: 1.0, alpha: 0.12)
+                  baseView.layer.cornerRadius = baseRadius
+                  baseView.layer.borderColor = UIColor(white: 1.0, alpha: 0.35).cgColor
+                  baseView.layer.borderWidth = 2
+                  baseView.isUserInteractionEnabled = false
+                  addSubview(baseView)
+                  
+                  stickView.frame = CGRect(x: 0, y: 0, width: stickRadius * 2, height: stickRadius * 2)
+                  stickView.backgroundColor = UIColor(white: 1.0, alpha: 0.75)
+                  stickView.layer.cornerRadius = stickRadius
+                  stickView.isUserInteractionEnabled = false
+                  addSubview(stickView)
+                  
+                  resetStick()
+              }
+              
+              private func resetStick() {
+                  baseView.center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
+                  stickView.center = baseView.center
+                  onChange(.zero)
+              }
+              
+              func handleTouch(_ touch: UITouch, isEnded: Bool = false) {
+                  if isEnded {
+                      resetStick()
+                      return
+                  }
+                  
+                  let loc = touch.location(in: self)
+                  let center = baseView.center
+                  
+                  let dx = loc.x - center.x
+                  let dy = loc.y - center.y
+                  let dist = sqrt(dx*dx + dy*dy)
+                  
+                  if dist == 0 {
+                      stickView.center = center
+                      onChange(.zero)
+                      return
+                  }
+                  
+                  let angle = atan2(dy, dx)
+                  let clampedDist = min(dist, baseRadius)
+                  
+                  let finalX = center.x + cos(angle) * clampedDist
+                  let finalY = center.y + sin(angle) * clampedDist
+                  
+                  stickView.center = CGPoint(x: finalX, y: finalY)
+                  
+                  let normX = cos(angle) * (clampedDist / baseRadius)
+                  let normY = sin(angle) * (clampedDist / baseRadius)
+                  onChange(CGPoint(x: normX, y: -normY)) 
+              }
+          }
+          EOF
+
+      # ── RPG Types ────────────────────────────────────────────────────────────
+      - name: Create Types.swift
+        run: |
+          cat << 'EOF' > GameHub/Sources/Types.swift
+          import UIKit
+          struct PhysicsMask {
+              static let none:   Int = 0
+              static let player: Int = 1 << 0
+              static let enemy:  Int = 1 << 1
+              static let slash:  Int = 1 << 2
+              static let wall:   Int = 1 << 3
+              static let ground: Int = 1 << 4
+          }
+          enum EnemyKind {
+              case goblin, darkKnight
+          }
+          EOF
+
+      # ── RPG HUDOverlay ───────────────────────────────────────────────────────
+      - name: Create HUDOverlay.swift
+        run: |
+          cat << 'EOF' > GameHub/Sources/HUDOverlay.swift
+          import UIKit
+          class HUDOverlay: UIView {
+              private let hpBg      = UIView()
+              private let hpBar     = UIView()
+              private let statLbl   = UILabel()
+              private let goldLbl   = UILabel()
+              private let msgLbl    = UILabel()
+              let renewBtn  = UIButton(type: .system)
+              let barW: CGFloat = 220
+              
+              var onRenewPressed: (() -> Void)?
+
+              override init(frame: CGRect) {
+                  super.init(frame: frame)
+                  buildUI()
+              }
+              required init?(coder: NSCoder) { fatalError() }
+              
+              private func customFont(_ size: CGFloat, bold: Bool = false) -> UIFont {
+                  return bold ? UIFont.systemFont(ofSize: size, weight: .bold) : UIFont.systemFont(ofSize: size, weight: .regular)
+              }
+              
+              private func buildUI() {
+                  hpBg.frame            = CGRect(x: 20, y: 20, width: barW + 4, height: 14)
+                  hpBg.backgroundColor  = UIColor(white: 0.05, alpha: 0.6)
+                  hpBg.layer.cornerRadius = 7
+                  hpBg.layer.borderColor = UIColor(white: 1.0, alpha: 0.15).cgColor
+                  hpBg.layer.borderWidth = 1
+                  addSubview(hpBg)
+                  
+                  hpBar.frame             = CGRect(x: 22, y: 22, width: barW, height: 10)
+                  hpBar.backgroundColor   = UIColor(red: 0.00, green: 0.90, blue: 0.45, alpha: 1.0)
+                  hpBar.layer.cornerRadius = 5
+                  addSubview(hpBar)
+                  
+                  goldLbl.frame            = CGRect(x: bounds.width - 240, y: 20, width: 220, height: 26)
+                  goldLbl.autoresizingMask = [.flexibleLeftMargin]
+                  goldLbl.text             = "GOLD: 0  |  XP: 0"
+                  goldLbl.textColor        = .orange
+                  goldLbl.font = customFont(16, bold: true)
+                  goldLbl.textAlignment    = .right
+                  addSubview(goldLbl)
+                  
+                  statLbl.frame            = CGRect(x: bounds.width - 250, y: bounds.height - 65, width: 230, height: 45)
+                  statLbl.autoresizingMask = [.flexibleLeftMargin, .flexibleTopMargin]
+                  statLbl.text             = "CAMERA: TPP MOUNTED"
+                  statLbl.textColor        = UIColor(red: 0.0, green: 0.9, blue: 1.0, alpha: 1.0)
+                  statLbl.font = customFont(16, bold: true)
+                  statLbl.textAlignment    = .right
+                  addSubview(statLbl)
+                  
+                  msgLbl.frame            = CGRect(x: 0, y: bounds.height * 0.35, width: bounds.width, height: 50)
+                  msgLbl.autoresizingMask = [.flexibleWidth, .flexibleTopMargin, .flexibleBottomMargin]
+                  msgLbl.textColor        = .white
+                  msgLbl.font = customFont(24, bold: true)
+                  msgLbl.textAlignment    = .center
+                  msgLbl.alpha            = 0
+                  addSubview(msgLbl)
+                  
+                  renewBtn.frame = CGRect(x: bounds.width/2 - 120, y: bounds.height * 0.55, width: 240, height: 50)
+                  renewBtn.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
+                  renewBtn.setTitle("REVIVE HERO (RESPAWN)", for: .normal)
+                  renewBtn.titleLabel?.font = customFont(14, bold: true)
+                  renewBtn.setTitleColor(.black, for: .normal)
+                  renewBtn.backgroundColor = .yellow
+                  renewBtn.layer.cornerRadius = 4
+                  renewBtn.isHidden = true
+                  renewBtn.addTarget(self, action: #selector(renewTapped), for: .touchUpInside)
+                  addSubview(renewBtn)
+              }
+              
+              @objc private func renewTapped() {
+                  onRenewPressed?()
+              }
+              
+              func update(health: Float, maxHealth: Float, gold: Int, xp: Int) {
+                  let ratio = CGFloat(max(0, health / maxHealth))
+                  UIView.animate(withDuration: 0.15) { self.hpBar.frame.size.width = self.barW * ratio }
+                  hpBar.backgroundColor = ratio > 0.5 ? .green : (ratio > 0.25 ? .orange : .red)
+                  goldLbl.text = "GOLD: \(gold)  |  XP: \(xp)"
+              }
+              
+              func showMessage(_ text: String, color: UIColor = .white, duration: TimeInterval = 2.0) {
+                  msgLbl.text      = text.uppercased()
+                  msgLbl.textColor = color
+                  msgLbl.alpha     = 1
+                  if duration > 0 {
+                      UIView.animate(withDuration: 0.3, delay: duration) { self.msgLbl.alpha = 0 }
+                  }
+              }
+              
+              func clearMessage() { msgLbl.alpha = 0 }
+          }
+          EOF
+
+      # ── RPG EnemyNode (Goblin & Dark Knight) ─────────────────────────────────
+      - name: Create EnemyNode.swift
+        run: |
+          cat << 'EOF' > GameHub/Sources/EnemyNode.swift
+          import SceneKit
+          import UIKit
+
+          class EnemyNode: SCNNode {
+              let kind: EnemyKind
+              var hp: Float
+              var isAlive = true
+              var lastAttackTime: TimeInterval = 0
+              
+              private var roamTarget: SCNVector3 = SCNVector3(0, 0, 0)
+              private var isChasing = false
+              private var speed: Float = 1.5
+              
+              init(kind: EnemyKind) {
+                  self.kind = kind
+                  self.hp = kind == .darkKnight ? 150.0 : 60.0
+                  super.init()
+                  buildRPGGeometry()
+                  buildPhysics()
+                  generateNewRoamTarget()
+              }
+              
+              required init?(coder: NSCoder) { fatalError() }
+              
+              private func buildRPGGeometry() {
+                  let mat = SCNMaterial()
+                  let bodyHeight: CGFloat = kind == .darkKnight ? 1.8 : 1.1
+                  let bodyRadius: CGFloat = kind == .darkKnight ? 0.4 : 0.25
+                  
+                  if kind == .darkKnight {
+                      let torso = SCNCapsule(capRadius: bodyRadius, height: bodyHeight)
+                      mat.diffuse.contents = UIColor(white: 0.12, alpha: 1.0)
+                      torso.materials = [mat]
+                      let bNode = SCNNode(geometry: torso)
+                      bNode.position = SCNVector3(0, Float(bodyHeight/2), 0)
+                      addChildNode(bNode)
+                      
+                      let helm = SCNBox(width: 0.5, height: 0.5, length: 0.5, chamferRadius: 0.1)
+                      helm.firstMaterial?.diffuse.contents = UIColor.gray
+                      let hNode = SCNNode(geometry: helm)
+                      hNode.position = SCNVector3(0, Float(bodyHeight), 0)
+                      addChildNode(hNode)
+                  } else {
+                      let torso = SCNCapsule(capRadius: bodyRadius, height: bodyHeight)
+                      mat.diffuse.contents = UIColor(red: 0.2, green: 0.6, blue: 0.2, alpha: 1.0)
+                      torso.materials = [mat]
+                      let bNode = SCNNode(geometry: torso)
+                      bNode.position = SCNVector3(0, Float(bodyHeight/2), 0)
+                      addChildNode(bNode)
+                      
+                      let head = SCNSphere(radius: 0.22)
+                      head.firstMaterial?.diffuse.contents = UIColor(red: 0.15, green: 0.5, blue: 0.15, alpha: 1.0)
+                      let hNode = SCNNode(geometry: head)
+                      hNode.position = SCNVector3(0, Float(bodyHeight), 0)
+                      addChildNode(hNode)
+                  }
+              }
+              
+              private func buildPhysics() {
+                  let height: CGFloat = kind == .darkKnight ? 1.8 : 1.1
+                  let shape = SCNPhysicsShape(geometry: SCNCapsule(capRadius: 0.4, height: height), options: nil)
+                  let body = SCNPhysicsBody(type: .kinematic, shape: shape)
+                  body.categoryBitMask = PhysicsMask.enemy
+                  body.contactTestBitMask = PhysicsMask.slash | PhysicsMask.player
+                  physicsBody = body
+              }
+              
+              private func generateNewRoamTarget() {
+                  let range: Float = 40.0
+                  roamTarget = SCNVector3(Float.random(in: -range...range), 0.5, Float.random(in: -range...range))
+                  speed = kind == .goblin ? Float.random(in: 2.5...3.5) : Float.random(in: 1.4...2.0)
+              }
+              
+              func updateAI(playerPosition: SCNVector3, dt: Float) {
+                  guard isAlive else { return }
+                  
+                  let dx = playerPosition.x - position.x
+                  let dz = playerPosition.z - position.z
+                  let distToPlayer = sqrt(dx * dx + dz * dz)
+                  
+                  let detectionRange: Float = kind == .darkKnight ? 14.0 : 9.0
+                  
+                  if distToPlayer < detectionRange {
+                      isChasing = true
+                      let angle = atan2(dx, dz)
+                      eulerAngles.y = angle
+                      
+                      if distToPlayer > 1.2 {
+                          position.x += (dx / distToPlayer) * speed * dt
+                          position.z += (dz / distToPlayer) * speed * dt
+                      }
+                  } else {
+                      if isChasing {
+                          isChasing = false
+                          generateNewRoamTarget()
+                      }
+                      
+                      let rDx = roamTarget.x - position.x
+                      let rDz = roamTarget.z - position.z
+                      let roamDist = sqrt(rDx * rDx + rDz * rDz)
+                      
+                      if roamDist < 1.0 {
+                          generateNewRoamTarget()
+                      } else {
+                          eulerAngles.y = atan2(rDx, rDz)
+                          position.x += (rDx / roamDist) * speed * dt
+                          position.z += (rDz / roamDist) * speed * dt
+                      }
+                  }
+              }
+              
+              func takeDamage(_ amount: Float) {
+                  guard isAlive else { return }
+                  hp -= amount
+                  if hp <= 0 {
+                      isAlive = false
+                      physicsBody = nil
+                      runAction(SCNAction.sequence([
+                          SCNAction.group([
+                              SCNAction.rotateBy(x: CGFloat(Float.pi/2), y: 0, z: 0, duration: 0.25),
+                              SCNAction.fadeOut(duration: 0.4)
+                          ]),
+                          SCNAction.removeFromParentNode()
+                      ]))
+                  }
+              }
+          }
+          EOF
+
+      # ── GameViewController (Mounted Dynamic TPP Camera & Polygon Engine) ────
+      - name: Create GameViewController.swift
+        run: |
+          cat << 'EOF' > GameHub/Sources/GameViewController.swift
+          import UIKit
+          import SceneKit
+
+          class GameViewController: UIViewController, SCNSceneRendererDelegate, SCNPhysicsContactDelegate {
+              
+              private var sceneView: SCNView!
+              private var scene: SCNScene!
+              private var hud: HUDOverlay!
+              
+              private var playerNode: SCNNode!
+              private var cameraNode: SCNNode!
+              private var cameraGimbal: SCNNode! // স্মুথ মোশন অ্যাঙ্কর
+              private var enemies: [EnemyNode] = []
+              
+              private var leftJoystick: TouchJoystick!
+              private var rightJoystick: TouchJoystick!
+              
+              private var leftVector: CGPoint = .zero
+              private var rightVector: CGPoint = .zero
+              
+              private var playerGold = 0
+              private var playerXP = 0
+              private var playerHP: Float = 100.0
+              private let maxPlayerHP: Float = 100.0
+              private var isGameOver = false
+              
+              private var lastAttackTime: TimeInterval = 0
+              private let attackRate: TimeInterval = 0.16
+              private var lastUpdateTime: TimeInterval = 0
+              
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  view.backgroundColor = .black
+                  
+                  setupEngine()
+                  setupRPGWorld()
+                  setupHeroPlayer()
+                  setupHUD()
+                  setupTouchJoysticks()
+                  
+                  spawnRPGEnemies(count: 35)
+              }
+              
+              override var prefersStatusBarHidden: Bool { return true }
+              override var supportedInterfaceOrientations: UIInterfaceOrientationMask { return .landscape }
+              
+              private func setupEngine() {
+                  sceneView = SCNView(frame: view.bounds)
+                  sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  sceneView.backgroundColor = .black
+                  sceneView.delegate = self
+                  sceneView.isPlaying = true
+                  view.addSubview(sceneView)
+                  
+                  scene = SCNScene()
+                  scene.physicsWorld.gravity = SCNVector3(0, -9.8, 0)
+                  scene.physicsWorld.contactDelegate = self
+                  sceneView.scene = scene
+              }
+              
+              private func setupRPGWorld() {
+                  let ambLight = SCNLight()
+                  ambLight.type = .ambient
+                  ambLight.color = UIColor(white: 0.55, alpha: 1.0)
+                  let ambNode = SCNNode()
+                  ambNode.light = ambLight
+                  scene.rootNode.addChildNode(ambNode)
+                  
+                  let sunLight = SCNLight()
+                  sunLight.type = .directional
+                  sunLight.color = UIColor(red: 1.0, green: 0.96, blue: 0.92, alpha: 1.0)
+                  sunLight.intensity = 1900
+                  sunLight.castsShadow = true
+                  let sunNode = SCNNode()
+                  sunNode.light = sunLight
+                  sunNode.position = SCNVector3(30, 50, 25)
+                  sunNode.look(at: SCNVector3(0, 0, 0))
+                  scene.rootNode.addChildNode(sunNode)
+                  
+                  let floorGeo = SCNFloor()
+                  floorGeo.reflectivity = 0.03
+                  let floorMat = SCNMaterial()
+                  floorMat.diffuse.contents = UIColor(red: 0.15, green: 0.35, blue: 0.2, alpha: 1.0)
+                  floorGeo.materials = [floorMat]
+                  let floorNode = SCNNode(geometry: floorGeo)
+                  floorNode.physicsBody = SCNPhysicsBody(type: .static, shape: nil)
+                  floorNode.physicsBody?.categoryBitMask = PhysicsMask.ground
+                  scene.rootNode.addChildNode(floorNode)
+              }
+              
+              private func setupHeroPlayer() {
+                  // রুট অবজেক্ট
+                  playerNode = SCNNode()
+                  playerNode.position = SCNVector3(0, 0, 0)
+                  
+                  // ── HIGH-POLY MESH ENGINE (GTA 3D MODEL SIMULATION) ──
+                  // ১. ধড় / জ্যাকেট
+                  let torsoGeo = SCNBox(width: 0.55, height: 0.75, length: 0.34, chamferRadius: 0.08)
+                  torsoGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.15, green: 0.15, blue: 0.18, alpha: 1.0) // টেক্সচার্ড মেটালিক লুক
+                  let torsoNode = SCNNode(geometry: torsoGeo)
+                  torsoNode.position = SCNVector3(0, 0.85, 0)
+                  playerNode.addChildNode(torsoNode)
+                  
+                  // ২. হেড মডেল
+                  let headGeo = SCNSphere(radius: 0.19)
+                  headGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.92, green: 0.75, blue: 0.6, alpha: 1.0)
+                  let headNode = SCNNode(geometry: headGeo)
+                  headNode.position = SCNVector3(0, 1.38, 0)
+                  playerNode.addChildNode(headNode)
+                  
+                  // ৩. পা জোড়া (Jeans Model)
+                  let legGeo = SCNCylinder(radius: 0.11, height: 0.58)
+                  legGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.12, green: 0.22, blue: 0.44, alpha: 1.0)
+                  
+                  let leftLeg = SCNNode(geometry: legGeo)
+                  leftLeg.position = SCNVector3(-0.16, 0.29, 0)
+                  playerNode.addChildNode(leftLeg)
+                  
+                  let rightLeg = SCNNode(geometry: legGeo)
+                  rightLeg.position = SCNVector3(0.16, 0.29, 0)
+                  playerNode.addChildNode(rightLeg)
+                  
+                  // ৪. হাত জোড়া (Arms)
+                  let armGeo = SCNCylinder(radius: 0.085, height: 0.62)
+                  armGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.2, green: 0.2, blue: 0.22, alpha: 1.0)
+                  
+                  let leftArm = SCNNode(geometry: armGeo)
+                  leftArm.position = SCNVector3(-0.39, 0.85, 0)
+                  playerNode.addChildNode(leftArm)
+                  
+                  let rightArm = SCNNode(geometry: armGeo)
+                  rightArm.position = SCNVector3(0.39, 0.85, 0)
+                  playerNode.addChildNode(rightArm)
+                  
+                  // ৫. রিয়েলস্টিক ওয়েপন ব্লেড
+                  let swordGeo = SCNBox(width: 0.05, height: 0.95, length: 0.05, chamferRadius: 0)
+                  swordGeo.firstMaterial?.diffuse.contents = UIColor.lightGray
+                  let swordNode = SCNNode(geometry: swordGeo)
+                  swordNode.position = SCNVector3(0.42, 0.95, -0.28)
+                  swordNode.eulerAngles = SCNVector3(-Float.pi / 4.0, 0, 0)
+                  playerNode.addChildNode(swordNode)
+                  
+                  // ফিজিক্স মেথড লকিং
+                  let shapeGeo = SCNCapsule(capRadius: 0.42, height: 1.75)
+                  let pBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: shapeGeo, options: nil))
+                  pBody.allowsResting = false
+                  pBody.friction = 0.0
+                  pBody.damping = 0.98
+                  pBody.angularVelocityFactor = SCNVector3(0, 0, 0)
+                  pBody.categoryBitMask = PhysicsMask.player
+                  pBody.collisionBitMask = PhysicsMask.wall | PhysicsMask.ground | PhysicsMask.enemy
+                  pBody.contactTestBitMask = PhysicsMask.enemy
+                  playerNode.physicsBody = pBody
+                  scene.rootNode.addChildNode(playerNode)
+                  
+                  // ── FIX: REAL THIRD PERSON MOUNTED CAMERA SYSTEM ──
+                  cameraGimbal = SCNNode()
+                  cameraGimbal.position = SCNVector3(0, 0, 0)
+                  playerNode.addChildNode(cameraGimbal) // ক্যারেক্টারের সাথে মাউন্ট করা হলো
+                  
+                  cameraNode = SCNNode()
+                  cameraNode.camera = SCNCamera()
+                  // GTA 5 স্টাইল অফসেট কোঅর্ডিনেটস (প্লেয়ারের ঠিক পেছনে এবং উঁচুতে)
+                  cameraNode.position = SCNVector3(0, 4.2, 5.0)
+                  
+                  // ক্যামেরা সবসময় প্লেয়ারের বুক ফোকাস করবে
+                  let lookAtConstraint = SCNLookAtConstraint(target: cameraGimbal)
+                  lookAtConstraint.isGimbalLockEnabled = true
+                  cameraNode.constraints = [lookAtConstraint]
+                  
+                  cameraGimbal.addChildNode(cameraNode)
+              }
+              
+              private func setupTouchJoysticks() {
+                  let padW: CGFloat = 140
+                  let padH: CGFloat = 140
+                  let bottomSpace: CGFloat = 30
+                  
+                  leftJoystick = TouchJoystick(frame: CGRect(x: 40, y: view.bounds.height - padH - bottomSpace, width: padW, height: padH))
+                  leftJoystick.autoresizingMask = [.flexibleTopMargin, .flexibleRightMargin]
+                  leftJoystick.onChange = { [weak self] vec in self?.leftVector = vec }
+                  view.addSubview(leftJoystick)
+                  
+                  rightJoystick = TouchJoystick(frame: CGRect(x: view.bounds.width - padW - 40, y: view.bounds.height - padH - bottomSpace, width: padW, height: padH))
+                  rightJoystick.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin]
+                  rightJoystick.onChange = { [weak self] vec in self?.rightVector = vec }
+                  view.addSubview(rightJoystick)
+              }
+              
+              override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+                  handleTouches(touches, isEnded: false)
+              }
+              override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+                  handleTouches(touches, isEnded: false)
+              }
+              override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+                  handleTouches(touches, isEnded: true)
+              }
+              override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+                  handleTouches(touches, isEnded: true)
+              }
+              
+              private func handleTouches(_ touches: Set<UITouch>, isEnded: Bool) {
+                  for touch in touches {
+                      let loc = touch.location(in: view)
+                      if loc.x < view.bounds.width / 2 {
+                          leftJoystick.handleTouch(touch, isEnded: isEnded)
+                      } else {
+                          rightJoystick.handleTouch(touch, isEnded: isEnded)
+                      }
+                  }
+              }
+              
+              private func spawnRPGEnemies(count: Int) {
+                  for _ in 0..<count {
+                      let kind: EnemyKind = Bool.random() ? .goblin : .darkKnight
+                      let enemy = EnemyNode(kind: kind)
+                      
+                      let spawnRadius = Float.random(in: 12...48)
+                      let angle = Float.random(in: 0...(Float.pi * 2.0))
+                      enemy.position = SCNVector3(sin(angle) * spawnRadius, 0.0, cos(angle) * spawnRadius)
+                      
+                      scene.rootNode.addChildNode(enemy)
+                      enemies.append(enemy)
+                  }
+              }
+              
+              private func setupHUD() {
+                  hud = HUDOverlay(frame: view.bounds)
+                  hud.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  hud.onRenewPressed = { [weak self] in self?.renewGame() }
+                  view.addSubview(hud)
+                  hud.update(health: playerHP, maxHealth: maxPlayerHP, gold: playerGold, xp: playerXP)
+              }
+              
+              func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+                  if isGameOver { return }
+                  
+                  if lastUpdateTime == 0 { lastUpdateTime = time }
+                  let dt = Float(time - lastUpdateTime)
+                  lastUpdateTime = time
+                  
+                  // ক্যারেক্টার লোকাল মুভমেন্ট ট্রান্সফর্ম লজিক
+                  if leftVector != .zero {
+                      let runSpeed: Float = 8.5
+                      let dx = Float(leftVector.x) * runSpeed * dt
+                      let dz = -Float(leftVector.y) * runSpeed * dt
+                      
+                      playerNode.position.x += dx
+                      playerNode.physicsBody?.resetTransform()
+                      playerNode.position.z += dz
+                      
+                      if rightVector == .zero {
+                          playerNode.eulerAngles.y = atan2(-dx, -dz)
+                      }
+                  }
+                  
+                  // ৩৬০° পারফেক্ট এইমিং ট্র্যাক সিস্টেম
+                  if rightVector != .zero {
+                      let aimAngle = atan2(-Float(rightVector.x), Float(rightVector.y))
+                      playerNode.eulerAngles.y = aimAngle
+                      
+                      if time - lastAttackTime >= attackRate {
+                          lastAttackTime = time
+                          executeSwordSlash(aimAngle: aimAngle)
+                      }
+                  }
+                  
+                  enemies = enemies.filter { $0.parent != nil }
+                  let pPos = playerNode.position
+                  for enemy in enemies {
+                      enemy.updateAI(playerPosition: pPos, dt: dt)
+                      
+                      let dx = enemy.position.x - pPos.x
+                      let dz = enemy.position.z - pPos.z
+                      if sqrt(dx*dx + dz*dz) < 1.3 {
+                          if time - enemy.lastAttackTime >= 1.2 {
+                              enemy.lastAttackTime = time
+                              let dmg = enemy.kind == .darkKnight ? 16.0 : 5.0
+                              playerHP = max(0, playerHP - Float(dmg))
+                              
+                              DispatchQueue.main.async { [weak self] in
+                                  guard let self = self else { return }
+                                  self.hud.update(health: self.playerHP, maxHealth: self.maxPlayerHP, gold: self.playerGold, xp: self.playerXP)
+                              }
+                              
+                              if playerHP <= 0 {
+                                  isGameOver = true
+                                  DispatchQueue.main.async { [weak self] in self?.triggerGameOver() }
+                              }
+                          }
+                      }
+                  }
+                  
+                  if enemies.count < 10 {
+                      DispatchQueue.main.async { [weak self] in self?.spawnRPGEnemies(count: 15) }
+                  }
+              }
+              
+              private func executeSwordSlash(aimAngle: Float) {
+                  let slashGeo = SCNCylinder(radius: 0.72, height: 0.05)
+                  slashGeo.firstMaterial?.diffuse.contents = UIColor.cyan
+                  slashGeo.firstMaterial?.lightingModel = .constant
+                  
+                  let slashNode = SCNNode(geometry: slashGeo)
+                  // অরিজিনাল ৩ডি ক্যারেক্টারের হাইট অবসেট অনুযায়ী বুলেট পজিশনিং ফিক্স
+                  slashNode.position = SCNVector3(playerNode.position.x, playerNode.position.y + 0.85, playerNode.position.z)
+                  slashNode.eulerAngles.x = Float.pi / 2.0
+                  
+                  let sBody = SCNPhysicsBody(type: .dynamic, shape: nil)
+                  sBody.isAffectedByGravity = false
+                  sBody.categoryBitMask = PhysicsMask.slash
+                  sBody.contactTestBitMask = PhysicsMask.enemy
+                  slashNode.physicsBody = sBody
+                  
+                  scene.rootNode.addChildNode(slashNode)
+                  
+                  let projectileSpeed: Float = 32.0
+                  sBody.velocity = SCNVector3(-sin(aimAngle) * projectileSpeed, 0, -cos(aimAngle) * projectileSpeed)
+                  
+                  slashNode.runAction(SCNAction.sequence([SCNAction.wait(duration: 0.65), SCNAction.removeFromParentNode()]))
+              }
+              
+              private func triggerGameOver() {
+                  hud.showMessage("HERO DEFEATED // GAME OVER", color: .red, duration: 0)
+                  hud.renewBtn.isHidden = false
+              }
+              
+              private func renewGame() {
+                  isGameOver = false
+                  playerHP = maxPlayerHP
+                  playerGold = 0
+                  playerXP = 0
+                  leftVector = .zero
+                  rightVector = .zero
+                  
+                  for enemy in enemies { enemy.removeFromParentNode() }
+                  enemies.removeAll()
+                  
+                  playerNode.position = SCNVector3(0, 0, 0)
+                  playerNode.physicsBody?.velocity = SCNVector3(0, 0, 0)
+                  
+                  hud.renewBtn.isHidden = true
+                  hud.clearMessage()
+                  hud.update(health: playerHP, maxHealth: maxPlayerHP, gold: playerGold, xp: playerXP)
+                  
+                  spawnRPGEnemies(count: 35)
+              }
+              
+              func physicsWorld(_ world: SCNPhysicsWorld, didBegin contact: SCNPhysicsContact) {
+                  let maskA = contact.nodeA.physicsBody?.categoryBitMask ?? 0
+                  let maskB = contact.nodeB.physicsBody?.categoryBitMask ?? 0
+                  
+                  if (maskA == PhysicsMask.slash && maskB == PhysicsMask.enemy) {
+                      handleSlashHit(slash: contact.nodeA, enemy: contact.nodeB as? EnemyNode)
+                  } else if (maskA == PhysicsMask.enemy && maskB == PhysicsMask.slash) {
+                      handleSlashHit(slash: contact.nodeB, enemy: contact.nodeA as? EnemyNode)
+                  }
+              }
+              
+              private func handleSlashHit(slash: SCNNode, enemy: EnemyNode?) {
+                  slash.removeFromParentNode()
+                  if let e = enemy, e.isAlive {
+                      e.takeDamage(50.0)
+                      if !e.isAlive {
+                          let goldReward = e.kind == .darkKnight ? Int.random(in: 60...120) : Int.random(in: 20...40)
+                          let xpReward = e.kind == .darkKnight ? 50 : 20
+                          
+                          playerGold += goldReward
+                          playerXP += xpReward
+                          
+                          DispatchQueue.main.async { [weak self] in
+                              guard let self = self else { return }
+                              self.hud.update(health: self.playerHP, maxHealth: self.maxPlayerHP, gold: self.playerGold, xp: self.playerXP)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+      # ── Project Configuration & Build System ─────────────────────────────────
+      - name: Create project.yml
+        run: |
+          cat << 'EOF' > project.yml
+          name: GameHub
+          options:
+            bundleIdPrefix: com.shadowvillage.game
+          targets:
+            GameHub:
+              type: application
+              platform: iOS
+              deploymentTarget: "15.0"
+              sources: [GameHub]
+              settings:
+                base:
+                  INFOPLIST_FILE: GameHub/Info.plist
+                  PRODUCT_BUNDLE_IDENTIFIER: com.shadowvillage.game.rpgadventure
+                  PRODUCT_NAME: GameHub
+                  MARKETING_VERSION: "1.0.0"
+                  CURRENT_PROJECT_VERSION: "1"
+                  TARGETED_DEVICE_FAMILY: "1,2"
+                  ASSETCATALOG_COMPILER_APPICON_NAME: ""
+                  ARCHS: "arm64"
+                  SDKROOT: "iphoneos"
+          EOF
+
+      - name: Create Info.plist
+        run: |
+          cat << 'EOF' > GameHub/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleIdentifier</key>
+              <string>com.shadowvillage.game.rpgadventure</string>
+              <key>CFBundleExecutable</key>
+              <string>GameHub</string>
+              <key>CFBundleName</key>
+              <string>GameHub</string>
+              <key>CFBundleDisplayName</key>
+              <string>RPGAdventure</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UILaunchStoryboardName</key>
+              <string></string>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+                  <string>metal</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Generate Xcode Project File
+        run: xcodegen generate
+
+      - name: Archive Project for Real Device (No-Sign Method)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project GameHub.xcodeproj \
+            -scheme GameHub \
+            -archivePath build/GameHub.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcpretty
+
+      - name: Package App Bundle into Installable IPA
+        run: |
+          mkdir -p build/IPA_Structure/Payload
+          cp -R build/GameHub.xcarchive/Products/Applications/GameHub.app build/IPA_Structure/Payload/
+          cd build/IPA_Structure
+          zip -q -r ../ShadowVillage3D.ipa Payload
+          cd ../..
+          echo "=== RPG OPEN WORLD ADVENTURE IPA GENERATED SUCCESSFULLY ==="
+
+      - name: Upload Artifact & Generate Direct Download Link
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadowVillage3D-iOS-IPA
+          path: build/ShadowVillage3D.ipa
+          retention-days: 7
