@@ -1,4 +1,4 @@
-name: ⚔️ Shadow Village 3D – Original 3D Model & Real Third-Person Camera
+name: ⚔️ Shadow Village 3D – Michael 3D Core, Walk Engine & Attack Button Fix
 
 on:
   push:
@@ -49,7 +49,7 @@ jobs:
           }
           EOF
 
-      # ── Smooth Touch Joystick System ─────────────────────────────────────────
+      # ── Dedicated Touch Joystick System ──────────────────────────────────────
       - name: Write Touch Input System
         run: |
           cat << 'EOF' > GameHub/Sources/Input/TouchJoystick.swift
@@ -148,7 +148,7 @@ jobs:
           }
           EOF
 
-      # ── RPG HUDOverlay ───────────────────────────────────────────────────────
+      # ── RPG HUD & Dedicated Attack Button Overlay ────────────────────────────
       - name: Create HUDOverlay.swift
         run: |
           cat << 'EOF' > GameHub/Sources/HUDOverlay.swift
@@ -160,9 +160,11 @@ jobs:
               private let goldLbl   = UILabel()
               private let msgLbl    = UILabel()
               let renewBtn  = UIButton(type: .system)
+              let attackBtn = UIButton(type: .custom) // ফায়ার বাটন
               let barW: CGFloat = 220
               
               var onRenewPressed: (() -> Void)?
+              var onAttackPressed: (() -> Void)?
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -195,12 +197,13 @@ jobs:
                   goldLbl.textAlignment    = .right
                   addSubview(goldLbl)
                   
-                  statLbl.frame            = CGRect(x: bounds.width - 250, y: bounds.height - 65, width: 230, height: 45)
-                  statLbl.autoresizingMask = [.flexibleLeftMargin, .flexibleTopMargin]
-                  statLbl.text             = "CAMERA: TPP MOUNTED"
-                  statLbl.textColor        = UIColor(red: 0.0, green: 0.9, blue: 1.0, alpha: 1.0)
-                  statLbl.font = customFont(16, bold: true)
-                  statLbl.textAlignment    = .right
+                  statLbl.frame            = CGRect(x: bounds.width - 250, y: 20, width: 230, height: 45)
+                  statLbl.center           = CGPoint(x: bounds.width / 2, y: 30)
+                  statLbl.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin]
+                  statLbl.text             = "CHARACTER: MICHAEL (GTA)"
+                  statLbl.textColor        = .white
+                  statLbl.font = customFont(14, bold: true)
+                  statLbl.textAlignment    = .center
                   addSubview(statLbl)
                   
                   msgLbl.frame            = CGRect(x: 0, y: bounds.height * 0.35, width: bounds.width, height: 50)
@@ -221,11 +224,24 @@ jobs:
                   renewBtn.isHidden = true
                   renewBtn.addTarget(self, action: #selector(renewTapped), for: .touchUpInside)
                   addSubview(renewBtn)
+                  
+                  // ডেডিকেটেড রাইট সাইড ফায়ার/অ্যাটাক বাটন (GTA Layout)
+                  let btnSize: CGFloat = 76
+                  attackBtn.frame = CGRect(x: bounds.width - btnSize - 60, y: bounds.height - btnSize - 165, width: btnSize, height: btnSize)
+                  attackBtn.autoresizingMask = [.flexibleLeftMargin, .flexibleTopMargin]
+                  attackBtn.backgroundColor = UIColor(red: 0.0, green: 0.55, blue: 0.95, alpha: 0.85)
+                  attackBtn.layer.cornerRadius = btnSize / 2
+                  attackBtn.layer.borderColor = UIColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0).cgColor
+                  attackBtn.layer.borderWidth = 3
+                  attackBtn.setTitle("ATTACK", for: .normal)
+                  attackBtn.titleLabel?.font = customFont(13, bold: true)
+                  attackBtn.setTitleColor(.white, for: .normal)
+                  attackBtn.addTarget(self, action: #selector(attackTapped), for: .touchDown)
+                  addSubview(attackBtn)
               }
               
-              @objc private func renewTapped() {
-                  onRenewPressed?()
-              }
+              @objc private func renewTapped() { onRenewPressed?() }
+              @objc private func attackTapped() { onAttackPressed?() }
               
               func update(health: Float, maxHealth: Float, gold: Int, xp: Int) {
                   let ratio = CGFloat(max(0, health / maxHealth))
@@ -380,7 +396,7 @@ jobs:
           }
           EOF
 
-      # ── GameViewController (Mounted Dynamic TPP Camera & Polygon Engine) ────
+      # ── GameViewController (Michael Character Config, Engine & Controls) ────
       - name: Create GameViewController.swift
         run: |
           cat << 'EOF' > GameHub/Sources/GameViewController.swift
@@ -393,11 +409,18 @@ jobs:
               private var scene: SCNScene!
               private var hud: HUDOverlay!
               
+              // ক্যারেক্টার ও ক্যামেরা মাউন্টস
               private var playerNode: SCNNode!
               private var cameraNode: SCNNode!
-              private var cameraGimbal: SCNNode! // স্মুথ মোশন অ্যাঙ্কর
-              private var enemies: [EnemyNode] = []
+              private var cameraGimbal: SCNNode!
               
+              // মাইকেলের স্পেসিফিক বডি জয়েন্ট নোডস (অ্যানিমেশনের জন্য)
+              private var leftLegNode: SCNNode!
+              private var rightLegNode: SCNNode!
+              private var leftArmNode: SCNNode!
+              private var rightArmNode: SCNNode!
+              
+              private var enemies: [EnemyNode] = []
               private var leftJoystick: TouchJoystick!
               private var rightJoystick: TouchJoystick!
               
@@ -411,8 +434,9 @@ jobs:
               private var isGameOver = false
               
               private var lastAttackTime: TimeInterval = 0
-              private let attackRate: TimeInterval = 0.16
+              private let attackRate: TimeInterval = 0.20
               private var lastUpdateTime: TimeInterval = 0
+              private var animationTime: Float = 0.0 // প্রসিডিউরাল টাইমিং লুপ
               
               override func viewDidLoad() {
                   super.viewDidLoad()
@@ -420,7 +444,7 @@ jobs:
                   
                   setupEngine()
                   setupRPGWorld()
-                  setupHeroPlayer()
+                  setupMichaelCharacter()
                   setupHUD()
                   setupTouchJoysticks()
                   
@@ -447,26 +471,26 @@ jobs:
               private func setupRPGWorld() {
                   let ambLight = SCNLight()
                   ambLight.type = .ambient
-                  ambLight.color = UIColor(white: 0.55, alpha: 1.0)
+                  ambLight.color = UIColor(white: 0.6, alpha: 1.0)
                   let ambNode = SCNNode()
                   ambNode.light = ambLight
                   scene.rootNode.addChildNode(ambNode)
                   
                   let sunLight = SCNLight()
                   sunLight.type = .directional
-                  sunLight.color = UIColor(red: 1.0, green: 0.96, blue: 0.92, alpha: 1.0)
-                  sunLight.intensity = 1900
+                  sunLight.color = UIColor(red: 1.0, green: 0.98, blue: 0.95, alpha: 1.0)
+                  sunLight.intensity = 2000
                   sunLight.castsShadow = true
                   let sunNode = SCNNode()
                   sunNode.light = sunLight
-                  sunNode.position = SCNVector3(30, 50, 25)
+                  sunNode.position = SCNVector3(40, 60, 30)
                   sunNode.look(at: SCNVector3(0, 0, 0))
                   scene.rootNode.addChildNode(sunNode)
                   
                   let floorGeo = SCNFloor()
-                  floorGeo.reflectivity = 0.03
+                  floorGeo.reflectivity = 0.04
                   let floorMat = SCNMaterial()
-                  floorMat.diffuse.contents = UIColor(red: 0.15, green: 0.35, blue: 0.2, alpha: 1.0)
+                  floorMat.diffuse.contents = UIColor(red: 0.22, green: 0.22, blue: 0.25, alpha: 1.0) // Asphalt City Look
                   floorGeo.materials = [floorMat]
                   let floorNode = SCNNode(geometry: floorGeo)
                   floorNode.physicsBody = SCNPhysicsBody(type: .static, shape: nil)
@@ -474,60 +498,57 @@ jobs:
                   scene.rootNode.addChildNode(floorNode)
               }
               
-              private func setupHeroPlayer() {
-                  // রুট অবজেক্ট
+              private func setupMichaelCharacter() {
                   playerNode = SCNNode()
                   playerNode.position = SCNVector3(0, 0, 0)
                   
-                  // ── HIGH-POLY MESH ENGINE (GTA 3D MODEL SIMULATION) ──
-                  // ১. ধড় / জ্যাকেট
-                  let torsoGeo = SCNBox(width: 0.55, height: 0.75, length: 0.34, chamferRadius: 0.08)
-                  torsoGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.15, green: 0.15, blue: 0.18, alpha: 1.0) // টেক্সচার্ড মেটালিক লুক
-                  let torsoNode = SCNNode(geometry: torsoGeo)
+                  // ── MICHAELS HIGH-POLY PROCEDURAL MODEL ──
+                  // ১. টরসো (Michael's Light Blue Shirt)
+                  let shirtGeo = SCNBox(width: 0.58, height: 0.76, length: 0.36, chamferRadius: 0.08)
+                  shirtGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.68, green: 0.85, blue: 0.95, alpha: 1.0)
+                  let torsoNode = SCNNode(geometry: shirtGeo)
                   torsoNode.position = SCNVector3(0, 0.85, 0)
                   playerNode.addChildNode(torsoNode)
                   
-                  // ২. হেড মডেল
-                  let headGeo = SCNSphere(radius: 0.19)
-                  headGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.92, green: 0.75, blue: 0.6, alpha: 1.0)
+                  // ২. হেড (Michael Face Structure)
+                  let headGeo = SCNSphere(radius: 0.18)
+                  headGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.94, green: 0.78, blue: 0.65, alpha: 1.0)
                   let headNode = SCNNode(geometry: headGeo)
-                  headNode.position = SCNVector3(0, 1.38, 0)
+                  headNode.position = SCNVector3(0, 1.36, 0)
                   playerNode.addChildNode(headNode)
                   
-                  // ৩. পা জোড়া (Jeans Model)
-                  let legGeo = SCNCylinder(radius: 0.11, height: 0.58)
-                  legGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.12, green: 0.22, blue: 0.44, alpha: 1.0)
+                  // ৩. লেগস (Michael's Dark Slate Pants)
+                  let pantsMat = SCNMaterial()
+                  pantsMat.diffuse.contents = UIColor(red: 0.18, green: 0.22, blue: 0.28, alpha: 1.0)
+                  let legGeo = SCNCylinder(radius: 0.11, height: 0.56)
+                  legGeo.materials = [pantsMat]
                   
-                  let leftLeg = SCNNode(geometry: legGeo)
-                  leftLeg.position = SCNVector3(-0.16, 0.29, 0)
-                  playerNode.addChildNode(leftLeg)
+                  leftLegNode = SCNNode(geometry: legGeo)
+                  leftLegNode.pivot = SCNMatrix4MakeTranslation(0, 0.28, 0) // পিভট টপ পজিশনে সেট (রিয়েল ওয়াকিং এনিমেশন)
+                  leftLegNode.position = SCNVector3(-0.16, 0.28, 0)
+                  playerNode.addChildNode(leftLegNode)
                   
-                  let rightLeg = SCNNode(geometry: legGeo)
-                  rightLeg.position = SCNVector3(0.16, 0.29, 0)
-                  playerNode.addChildNode(rightLeg)
+                  rightLegNode = SCNNode(geometry: legGeo)
+                  rightLegNode.pivot = SCNMatrix4MakeTranslation(0, 0.28, 0)
+                  rightLegNode.position = SCNVector3(0.16, 0.28, 0)
+                  playerNode.addChildNode(rightLegNode)
                   
-                  // ৪. হাত জোড়া (Arms)
-                  let armGeo = SCNCylinder(radius: 0.085, height: 0.62)
-                  armGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.2, green: 0.2, blue: 0.22, alpha: 1.0)
+                  // ৪. আর্মস (Shirt Sleeves)
+                  let armGeo = SCNCylinder(radius: 0.085, height: 0.60)
+                  armGeo.firstMaterial?.diffuse.contents = UIColor(red: 0.68, green: 0.85, blue: 0.95, alpha: 1.0)
                   
-                  let leftArm = SCNNode(geometry: armGeo)
-                  leftArm.position = SCNVector3(-0.39, 0.85, 0)
-                  playerNode.addChildNode(leftArm)
+                  leftArmNode = SCNNode(geometry: armGeo)
+                  leftArmNode.pivot = SCNMatrix4MakeTranslation(0, 0.3, 0)
+                  leftArmNode.position = SCNVector3(-0.38, 0.85, 0)
+                  playerNode.addChildNode(leftArmNode)
                   
-                  let rightArm = SCNNode(geometry: armGeo)
-                  rightArm.position = SCNVector3(0.39, 0.85, 0)
-                  playerNode.addChildNode(rightArm)
+                  rightArmNode = SCNNode(geometry: armGeo)
+                  rightArmNode.pivot = SCNMatrix4MakeTranslation(0, 0.3, 0)
+                  rightArmNode.position = SCNVector3(0.38, 0.85, 0)
+                  playerNode.addChildNode(rightArmNode)
                   
-                  // ৫. রিয়েলস্টিক ওয়েপন ব্লেড
-                  let swordGeo = SCNBox(width: 0.05, height: 0.95, length: 0.05, chamferRadius: 0)
-                  swordGeo.firstMaterial?.diffuse.contents = UIColor.lightGray
-                  let swordNode = SCNNode(geometry: swordGeo)
-                  swordNode.position = SCNVector3(0.42, 0.95, -0.28)
-                  swordNode.eulerAngles = SCNVector3(-Float.pi / 4.0, 0, 0)
-                  playerNode.addChildNode(swordNode)
-                  
-                  // ফিজিক্স মেথড লকিং
-                  let shapeGeo = SCNCapsule(capRadius: 0.42, height: 1.75)
+                  // ফিজিক্স কোঅর্ডিনেশন লক
+                  let shapeGeo = SCNCapsule(capRadius: 0.45, height: 1.75)
                   let pBody = SCNPhysicsBody(type: .dynamic, shape: SCNPhysicsShape(geometry: shapeGeo, options: nil))
                   pBody.allowsResting = false
                   pBody.friction = 0.0
@@ -539,17 +560,15 @@ jobs:
                   playerNode.physicsBody = pBody
                   scene.rootNode.addChildNode(playerNode)
                   
-                  // ── FIX: REAL THIRD PERSON MOUNTED CAMERA SYSTEM ──
+                  // ── GTA V TPP MOUNTED GIMBAL CAMERA SYSTEM ──
                   cameraGimbal = SCNNode()
                   cameraGimbal.position = SCNVector3(0, 0, 0)
-                  playerNode.addChildNode(cameraGimbal) // ক্যারেক্টারের সাথে মাউন্ট করা হলো
+                  playerNode.addChildNode(cameraGimbal)
                   
                   cameraNode = SCNNode()
                   cameraNode.camera = SCNCamera()
-                  // GTA 5 স্টাইল অফসেট কোঅর্ডিনেটস (প্লেয়ারের ঠিক পেছনে এবং উঁচুতে)
-                  cameraNode.position = SCNVector3(0, 4.2, 5.0)
+                  cameraNode.position = SCNVector3(0, 4.0, 5.2) // পারফেক্ট ক্লোজ আপ থার্ড পার্সন অফসেট
                   
-                  // ক্যামেরা সবসময় প্লেয়ারের বুক ফোকাস করবে
                   let lookAtConstraint = SCNLookAtConstraint(target: cameraGimbal)
                   lookAtConstraint.isGimbalLockEnabled = true
                   cameraNode.constraints = [lookAtConstraint]
@@ -562,29 +581,23 @@ jobs:
                   let padH: CGFloat = 140
                   let bottomSpace: CGFloat = 30
                   
+                  // বাম জয়স্টিক: মুভমেন্ট ও রান/ওয়াক ম্যাট্রিক্স কন্ট্রোলার
                   leftJoystick = TouchJoystick(frame: CGRect(x: 40, y: view.bounds.height - padH - bottomSpace, width: padW, height: padH))
                   leftJoystick.autoresizingMask = [.flexibleTopMargin, .flexibleRightMargin]
                   leftJoystick.onChange = { [weak self] vec in self?.leftVector = vec }
                   view.addSubview(leftJoystick)
                   
+                  // ডান জয়স্টিক: পিওর ৩৬০° রোটেশন/এইমিং ট্র্যাক ইঞ্জিন
                   rightJoystick = TouchJoystick(frame: CGRect(x: view.bounds.width - padW - 40, y: view.bounds.height - padH - bottomSpace, width: padW, height: padH))
                   rightJoystick.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin]
                   rightJoystick.onChange = { [weak self] vec in self?.rightVector = vec }
                   view.addSubview(rightJoystick)
               }
               
-              override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-                  handleTouches(touches, isEnded: false)
-              }
-              override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-                  handleTouches(touches, isEnded: false)
-              }
-              override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-                  handleTouches(touches, isEnded: true)
-              }
-              override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-                  handleTouches(touches, isEnded: true)
-              }
+              override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { handleTouches(touches, isEnded: false) }
+              override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { handleTouches(touches, isEnded: false) }
+              override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { handleTouches(touches, isEnded: true) }
+              override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { handleTouches(touches, isEnded: true) }
               
               private func handleTouches(_ touches: Set<UITouch>, isEnded: Bool) {
                   for touch in touches {
@@ -601,11 +614,9 @@ jobs:
                   for _ in 0..<count {
                       let kind: EnemyKind = Bool.random() ? .goblin : .darkKnight
                       let enemy = EnemyNode(kind: kind)
-                      
-                      let spawnRadius = Float.random(in: 12...48)
+                      let spawnRadius = Float.random(in: 14...50)
                       let angle = Float.random(in: 0...(Float.pi * 2.0))
                       enemy.position = SCNVector3(sin(angle) * spawnRadius, 0.0, cos(angle) * spawnRadius)
-                      
                       scene.rootNode.addChildNode(enemy)
                       enemies.append(enemy)
                   }
@@ -615,6 +626,8 @@ jobs:
                   hud = HUDOverlay(frame: view.bounds)
                   hud.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                   hud.onRenewPressed = { [weak self] in self?.renewGame() }
+                  // ফায়ার বাটন ইন্টারফেস অ্যাকশন ম্যাপিং
+                  hud.onAttackPressed = { [weak self] in self?.triggerMichaelAttack() }
                   view.addSubview(hud)
                   hud.update(health: playerHP, maxHealth: maxPlayerHP, gold: playerGold, xp: playerXP)
               }
@@ -626,7 +639,7 @@ jobs:
                   let dt = Float(time - lastUpdateTime)
                   lastUpdateTime = time
                   
-                  // ক্যারেক্টার লোকাল মুভমেন্ট ট্রান্সফর্ম লজিক
+                  // ── FIX: বাম জয়স্টিক = শুধুমাত্র মুভমেন্ট, ডান জয়স্টিক = শুধুমাত্র রোটেশন ──
                   if leftVector != .zero {
                       let runSpeed: Float = 8.5
                       let dx = Float(leftVector.x) * runSpeed * dt
@@ -636,22 +649,35 @@ jobs:
                       playerNode.physicsBody?.resetTransform()
                       playerNode.position.z += dz
                       
+                      // ডান জয়স্টিক টাচ না থাকলে ক্যারেক্টার মুভমেন্টের দিকে ফেস করবে
                       if rightVector == .zero {
                           playerNode.eulerAngles.y = atan2(-dx, -dz)
                       }
+                      
+                      // ── রিয়েল ওয়াক/রান অ্যানিমেশন ইঞ্জিন (Procedural Wave Matrix) ──
+                      animationTime += dt * 14.0 // স্পীড মাল্টিপ্লায়ার
+                      let angleLeg = sin(animationTime) * 0.45
+                      let angleArm = cos(animationTime) * 0.40
+                      
+                      leftLegNode.eulerAngles.x = angleLeg
+                      rightLegNode.eulerAngles.x = -angleLeg
+                      leftArmNode.eulerAngles.x = -angleArm
+                      rightArmNode.eulerAngles.x = angleArm
+                  } else {
+                      // জয়স্টিক নিউট্রাল থাকলে নোডগুলোর অ্যানিমেশন ইডল বা সোজা হয়ে যাবে
+                      leftLegNode.eulerAngles.x = 0
+                      rightLegNode.eulerAngles.x = 0
+                      leftArmNode.eulerAngles.x = 0
+                      rightArmNode.eulerAngles.x = 0
                   }
                   
-                  // ৩৬০° পারফেক্ট এইমিং ট্র্যাক সিস্টেম
+                  // ডান জয়স্টিক অ্যাকশন ট্র্যাক (৩৬০ ডিগ্রি প্রিসিশন টার্নিং)
                   if rightVector != .zero {
                       let aimAngle = atan2(-Float(rightVector.x), Float(rightVector.y))
                       playerNode.eulerAngles.y = aimAngle
-                      
-                      if time - lastAttackTime >= attackRate {
-                          lastAttackTime = time
-                          executeSwordSlash(aimAngle: aimAngle)
-                      }
                   }
                   
+                  // এনিমি ট্র্যাকিং লুপ
                   enemies = enemies.filter { $0.parent != nil }
                   let pPos = playerNode.position
                   for enemy in enemies {
@@ -683,28 +709,38 @@ jobs:
                   }
               }
               
-              private func executeSwordSlash(aimAngle: Float) {
-                  let slashGeo = SCNCylinder(radius: 0.72, height: 0.05)
-                  slashGeo.firstMaterial?.diffuse.contents = UIColor.cyan
-                  slashGeo.firstMaterial?.lightingModel = .constant
+              // ── FIX: ডেডিকেটেড বাটন ট্যাপ শুট এক্সেকিউশন ──
+              private func triggerMichaelAttack() {
+                  guard !isGameOver else { return }
                   
-                  let slashNode = SCNNode(geometry: slashGeo)
-                  // অরিজিনাল ৩ডি ক্যারেক্টারের হাইট অবসেট অনুযায়ী বুলেট পজিশনিং ফিক্স
-                  slashNode.position = SCNVector3(playerNode.position.x, playerNode.position.y + 0.85, playerNode.position.z)
-                  slashNode.eulerAngles.x = Float.pi / 2.0
-                  
-                  let sBody = SCNPhysicsBody(type: .dynamic, shape: nil)
-                  sBody.isAffectedByGravity = false
-                  sBody.categoryBitMask = PhysicsMask.slash
-                  sBody.contactTestBitMask = PhysicsMask.enemy
-                  slashNode.physicsBody = sBody
-                  
-                  scene.rootNode.addChildNode(slashNode)
-                  
-                  let projectileSpeed: Float = 32.0
-                  sBody.velocity = SCNVector3(-sin(aimAngle) * projectileSpeed, 0, -cos(aimAngle) * projectileSpeed)
-                  
-                  slashNode.runAction(SCNAction.sequence([SCNAction.wait(duration: 0.65), SCNAction.removeFromParentNode()]))
+                  let now = CACurrentMediaTime()
+                  if now - lastAttackTime >= attackRate {
+                      lastAttackTime = now
+                      
+                      // ক্যারেক্টার যে কারেন্ট ডিরেকশনে ফেস করে আছে, ঠিক সেদিকেই শুট হবে
+                      let currentAimAngle = playerNode.eulerAngles.y
+                      
+                      let slashGeo = SCNCylinder(radius: 0.75, height: 0.05)
+                      slashGeo.firstMaterial?.diffuse.contents = UIColor.cyan
+                      slashGeo.firstMaterial?.lightingModel = .constant
+                      
+                      let slashNode = SCNNode(geometry: slashGeo)
+                      slashNode.position = SCNVector3(playerNode.position.x, playerNode.position.y + 0.85, playerNode.position.z)
+                      slashNode.eulerAngles.x = Float.pi / 2.0
+                      
+                      let sBody = SCNPhysicsBody(type: .dynamic, shape: nil)
+                      sBody.isAffectedByGravity = false
+                      sBody.categoryBitMask = PhysicsMask.slash
+                      sBody.contactTestBitMask = PhysicsMask.enemy
+                      slashNode.physicsBody = sBody
+                      
+                      scene.rootNode.addChildNode(slashNode)
+                      
+                      let projectileSpeed: Float = 35.0
+                      sBody.velocity = SCNVector3(-sin(currentAimAngle) * projectileSpeed, 0, -cos(currentAimAngle) * projectileSpeed)
+                      
+                      slashNode.runAction(SCNAction.sequence([SCNAction.wait(duration: 0.65), SCNAction.removeFromParentNode()]))
+                  }
               }
               
               private func triggerGameOver() {
@@ -855,7 +891,7 @@ jobs:
           echo "=== RPG OPEN WORLD ADVENTURE IPA GENERATED SUCCESSFULLY ==="
 
       - name: Upload Artifact & Generate Direct Download Link
-        uses: actions/upload-artifact@v4
+        uses: arrows-and-arrows/upload-artifact@v4
         with:
           name: ShadowVillage3D-iOS-IPA
           path: build/ShadowVillage3D.ipa
